@@ -309,6 +309,337 @@ $ curl http://localhost:9200/
 
 <br>
 
+### 創建 Kibana Deployment Service
+
+要在 Kubernetes 上啟動 Kibana，我們要先創建一個名為 Service `kibana`，以及包含一個副本的 Deployment。我們先創建名為 kibana.yaml 的 yaml 檔：
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: kube-logging
+  labels:
+    app: kibana
+spec:
+  ports:
+    - port: 5601
+  selector:
+    app: kibana
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: kube-logging
+  labels:
+    app: kibana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      containers:
+        - name: kibana
+          image: kibana:8.1.3
+          resources:
+            limits:
+              cpu: 1000m
+            requests:
+              cpu: 100m
+          env:
+            - name: ELASTICSEARCH_URL
+              value: http://elasticsearch:9200
+          ports:
+            - containerPort: 5601
+```
+
+一樣我們要把 `kibana` 加入 `kube-logging` 的命名空間，讓它以去調用其他服務，並賦予 `app: kibana` 標籤。並指定本機訪問 Port 為 `5601`，並使用 `app: kibana` 標籤來選擇服務的 Pod。我們在 `Deployment` 定義 1 個 Pod 副本，我們使用 `kibana:8.1.3` image，記得要跟 Elasticsearch 使用相同版本，此外我們還有設定 Pod 最少使用 0.1 個 CPU、最多使用 1 個 CPU。最後在環境變數中使用 `ELASTICSEARCH_URL` 設定 Elasticsearch 的叢集以及 Port。
+
+<br>
+
+都完成後，我們來開始部署：
+
+```sh
+$ kubectl apply -f kibana.yaml
+
+service/kibana created
+deployment.apps/kibana created
+```
+
+<br>
+
+一樣我們用 minikube dashboard 來查看是否部署成功：
+
+<br>
+
+![圖片](https://raw.githubusercontent.com/880831ian/Kubernetes-EFK/master/images/kibana-1.png)
+
+<br>
+
+沒有問題後，我們用 `port-forward` 將本地 Port 轉發到 Pod 上：
+
+```sh
+$  kubectl port-forward kibana-75cbbfcd9c-nr4r8 5601:5601 --namespace=kube-logging
+
+Forwarding from 127.0.0.1:5601 -> 5601
+Forwarding from [::1]:5601 -> 5601
+Handling connection for 5601
+```
+
+<br>
+
+開啟瀏覽器瀏覽 `http://localhost:5601`，如果可以進入 Kibana，就代表成功將 Kibana 部署到 Kubernetes 叢集中：
+
+<br>
+
+![圖片](https://raw.githubusercontent.com/880831ian/Kubernetes-EFK/master/images/kibana-2.png)
+
+<br>
+
+### 創建 Fluentd DaemonSet
+
+我們要將 Fluentd 設置成 DaemonSet，讓它在 Kubernetes 叢集中每個節點上運行 Pod 副本。用 DaemonSet 控制器，可以將叢集中每個節點部署 Fluentd Pod，詳細可以參考 [Using a node logging agent](https://kubernetes.io/docs/concepts/cluster-administration/logging/#using-a-node-logging-agent)。在 Kubernetes 中，容器化的應用程式會透過 stdout 將日誌 log 定向到節點上的 JSON 文件。Fluentd Pod 會追蹤這些日誌文件、過濾日誌事件、轉換日誌的數據，並發送到我們部署的 Elasticsearch 後端。
+
+除了容器的日誌，Fluentd 還會追蹤 Kubernetes 系統日誌，例如：kubelet、kube-proxy 和 Docker 日誌。
+
+<br>
+
+先創建一個 `fluentd.yaml` 的 yaml 檔 (因為程式長度，所以分開說明，要完整請參考 [Github 程式碼連結](https://github.com/880831ian/Kubernetes-EFK))：
+
+#### 創建 ServiceAccount
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluentd
+  namespace: kube-logging
+  labels:
+    app: fluentd
+```
+我們先創建一個服務帳號 `fluentd`，Fluentd Pod 將使用它來訪問 Kubernetes API。我們在 `kube-logging` namespace 中創建它並再次賦予它 label `app: fluentd`。
+
+<br>
+
+#### 創建 ClusterRole
+
+接著...
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluentd
+  labels:
+    app: fluentd
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - namespaces
+    verbs:
+      - get
+      - list
+      - watch
+```
+在這邊我們定義一個 ClusterRole `fluentd`，設定我們對叢集範圍的 Kubernetes 資源（如節點）的訪問權限，我們設定 `get`、`list`、`watch` 等權限。
+
+<br>
+
+#### 創建 ClusterRoleBinding
+
+接著...
+```yaml
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: fluentd
+roleRef:
+  kind: ClusterRole
+  name: fluentd
+  apiGroup: rbac.authorization.k8s.io
+subjects:
+  - kind: ServiceAccount
+    name: fluentd
+    namespace: kube-logging
+```
+我們定義一個將 ClusterRole 綁定到 ServiceAccount 的 ClusterRoleBinding 調用。
+
+<br>
+
+#### 創建 DaemonSet
+
+接著...
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluentd
+  namespace: kube-logging
+  labels:
+    app: fluentd
+```
+定義一個可以在 `kube-logging` namespace 中調用的 DaemonSet，並給它一個 `app: fluentd` 標籤。
+
+<br>
+
+接著...
+```yaml
+spec:
+  selector:
+    matchLabels:
+      app: fluentd
+  template:
+    metadata:
+      labels:
+        app: fluentd
+    spec:
+      serviceAccount: fluentd
+      serviceAccountName: fluentd
+      tolerations:
+        - key: node-role.kubernetes.io/master
+          effect: NoSchedule
+      containers:
+        - name: fluentd
+          image: fluent/fluentd-kubernetes-daemonset:v1.14.6-debian-elasticsearch7-1.0
+          env:
+            - name: FLUENT_ELASTICSEARCH_HOST
+              value: "elasticsearch.kube-logging.svc.cluster.local"
+            - name: FLUENT_ELASTICSEARCH_PORT
+              value: "9200"
+            - name: FLUENT_ELASTICSEARCH_SCHEME
+              value: "http"
+            - name: FLUENTD_SYSTEMD_CONF
+              value: disable
+```
+我們先匹配 `.metadata.labels` 定義的標籤 `app: fluentd` ，然後為 DaemonSet 分配 `fluentd` Service Account。選擇 `app: fluentd` 作為這個 DaemonSet 管理的 Pod。
+
+我們定義 `NoSchedule` 容忍度來匹配 Kubernetes master node 上的等效污點。他可以確保 DaemonSet 也被部署到 Kubernetes 主服務器。
+
+接下來定義 Pod 容器，我們將名稱取為 `fluentd`，我們使用的映像檔是 [fluent/fluentd-kubernetes-daemonset:v1.14.6-debian-elasticsearch7-1.0](https://hub.docker.com/layers/fluentd-kubernetes-daemonset/fluent/fluentd-kubernetes-daemonset/v1.14.6-debian-elasticsearch7-1.0/images/sha256-9c960d2ebf6b8ba290bafd4ff386f26427a5469767b609e8735a3d983deb64b0?context=explore)，最後配置一些環境變數：
+* `FLUENT_ELASTICSEARCH_HOST`：設置我們之前定義的 Elasticsearch Headless 位址。`elasticsearch.kube-logging.svc.cluster.local` 會解析 3 個 Elasticsearch Pod 的 IP 地址列表。
+* `FLUENT_ELASTICSEARCH_PORT`：設置我們之前定義的 Elasticsearch `9200` Port。
+* `FLUENT_ELASTICSEARCH_SCHEME`：我們設置 `http`。
+* `FLUENTD_SYSTEMD_CONF`：我們將 `systemd` 在容器中設定相關的輸出設置為 `disable`。
+
+<br>
+
+接著...
+```yaml
+          resources:
+            limits:
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 200Mi
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log
+            - name: varlibdockercontainers
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: varlibdockercontainers
+          hostPath:
+            path: /var/lib/docker/containers
+```
+我們設置 Fluentd Pod 上使用 512 MiB 的內存限制，並保證 0.1 個 CPU 跟 200 MiB 的內存。我們將 varlog `/var/log` 掛載到容器的 varlibdockercontainers `var/lib/docker/containers` 中。最後一個設定是 `Fluentd` 在收到信號 `terminationGracePeriodSeconds` 後有 30 秒的時間可以優雅的關閉。
+
+<br>
+
+都定義完成後，我們部署 Fluentd DaemonSet：
+
+```sh
+$ kubectl apply -f fluentd.yaml
+
+serviceaccount/fluentd created
+clusterrole.rbac.authorization.k8s.io/fluentd created
+clusterrolebinding.rbac.authorization.k8s.io/fluentd created
+daemonset.apps/fluentd created
+```
+
+
+<br>
+
+一樣我們用 minikube dashboard 來查看是否部署成功：
+
+<br>
+
+![圖片](https://raw.githubusercontent.com/880831ian/Kubernetes-EFK/master/images/Daemonset.png)
+
+<br>
+
+我們使用剛剛的 kibana `port-forward` 將本地 Port 轉發到 Pod 上：
+
+```sh
+$  kubectl port-forward kibana-75cbbfcd9c-nr4r8 5601:5601 --namespace=kube-logging
+
+Forwarding from 127.0.0.1:5601 -> 5601
+Forwarding from [::1]:5601 -> 5601
+Handling connection for 5601
+```
+
+<br>
+
+開啟瀏覽器瀏覽 `http://localhost:5601`，點選 Management > Stack Management：
+
+<br>
+
+![圖片](https://raw.githubusercontent.com/880831ian/Kubernetes-EFK/master/images/fluentd-1.png)
+
+<br>
+
+點選 Kibana > Data Views，會看到跳出一個視窗，有一個按鈕寫 Create data view：
+
+<br>
+
+![圖片](https://raw.githubusercontent.com/880831ian/Kubernetes-EFK/master/images/fluentd-2.png)
+
+<br>
+
+Name 輸入 `logstash*` ，並選擇 `@timestamp` 來用時間過濾日誌，最後按下 Create date view：
+
+<br>
+
+![圖片](https://raw.githubusercontent.com/880831ian/Kubernetes-EFK/master/images/fluentd-3.png)
+
+<br>
+
+設定好 logstash* 的 Data views，再點選左邊欄位的 Discover：
+
+<br>
+
+![圖片](https://raw.githubusercontent.com/880831ian/Kubernetes-EFK/master/images/fluentd-4.png)
+
+<br>
+
+就可以看到顯示容器的 log 日誌拉！
+
+<br>
+
+![圖片](https://raw.githubusercontent.com/880831ian/Kubernetes-EFK/master/images/log.png)
+
+<br>
+
+## 部署常見問題及解決辦法
+
+Q1 . Elasticsearch 部署成功後會一直重新啟動？ 
+
+Ans 1：原因是 Elasticsearch 從 8.x 版本後，會自動開啟 SSL 認證，我們在 `env` 環境變數設定時，如果沒有多加 SSL Key 等設定值，Elasticsearch  這個 Pod 會啟動後，一直重新啟動，導致服務無法正常使用，只需要在環境變數中加入 xpack.security.enabled ，設定為 false 就可以解決。
+
+<br>
+
+
 ## 參考資料
 
 [How To Set Up an Elasticsearch, Fluentd and Kibana (EFK) Logging Stack on Kubernetes](https://www.digitalocean.com/community/tutorials/how-to-set-up-an-elasticsearch-fluentd-and-kibana-efk-logging-stack-on-kubernetes)
