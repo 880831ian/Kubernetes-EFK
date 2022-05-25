@@ -7,7 +7,7 @@
 那由於本文會直接帶入程式，觀念部分，可以先查看：
 
 * Kubernetes : [Kubernetes (K8s) 介紹 - 基本](https://pin-yi.me/k8s/)
-*  kubernetes : [Kubernetes (K8s) 介紹 - 進階 (Service、Ingress、StatefulSet、Deployment、ReplicaSet)](https://pin-yi.me/k8s-advanced/)
+*  kubernetes : [Kubernetes (K8s) 介紹 - 進階 (Service、Ingress、StatefulSet、Deployment、ReplicaSet、ConfigMap)](https://pin-yi.me/k8s-advanced/)
 *  EFK : [用 EFK 收集容器日誌 (HAProxy、Redis Sentinel、Docker-compose)](https://pin-yi.me/docker-compose-redis-sentinel-haproxy-efk/)
 
 <br>
